@@ -27,8 +27,8 @@ FROM ghcr.io/open-meteo/docker-container-run:latest
 RUN useradd --user-group --create-home --system --skel /dev/null --home-dir /app openmeteo
 
 #Install Cron
-RUN apt-get update
-RUN apt-get -y install cron
+RUN apt-get update \  
+&& apt-get install cron -y && apt-get install vim -y
 
 # Switch to the new home directory
 WORKDIR /app
