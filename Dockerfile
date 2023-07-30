@@ -15,7 +15,7 @@ RUN swift package resolve
 COPY . .
 
 # Compile with optimizations
-RUN swift build -c release
+RUN swift build -c release -Xcc -march=skylake
 
 
 # ================================
@@ -37,7 +37,7 @@ WORKDIR /app
 COPY --from=build --chown=openmeteo:openmeteo /build/.build/release/openmeteo-api /app
 RUN mkdir -p /app/Resources
 # COPY --from=build --chown=openmeteo:openmeteo /build/Resources /app/Resources
-COPY --from=build --chown=openmeteo:openmeteo /build/.build/release/SwiftTimeZoneLookup_SwiftTimeZoneLookup.resources /app/Resources/
+COPY --from=build --chown=openmeteo:openmeteo /build/.build/release/SwiftTimeZoneLookup_SwiftTimeZoneLookup.resources /app/Resources/SwiftTimeZoneLookup_SwiftTimeZoneLookup.resources
 COPY --from=build --chown=openmeteo:openmeteo /build/Public /app/Public
 
 COPY init.sh cronjobs /app/

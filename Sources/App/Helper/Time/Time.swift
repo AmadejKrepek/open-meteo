@@ -28,15 +28,15 @@ public struct Timestamp: Hashable {
     
     /// Hour in 0-23
     @inlinable public var hour: Int {
-        (timeIntervalSince1970 % 86400) / 3600
+        timeIntervalSince1970.moduloPositive(86400) / 3600
     }
     /// Minute in 0-59
     @inlinable public var minute: Int {
-        (timeIntervalSince1970 % 3600) / 60
+        timeIntervalSince1970.moduloPositive(3600) / 60
     }
     /// Second in 0-59
     @inlinable public var second: Int {
-        timeIntervalSince1970 % 60
+        timeIntervalSince1970.moduloPositive(60)
     }
     
     public static func now() -> Timestamp {
@@ -47,7 +47,7 @@ public struct Timestamp: Hashable {
     public init(_ year: Int, _ month: Int, _ day: Int, _ hour: Int = 0, _ minute: Int = 0, _ second: Int = 0) {
         assert(month > 0)
         assert(day > 0)
-        assert(year > 1900)
+        assert(year >= 1900)
         assert(month <= 12)
         assert(day <= 31)
         var t = tm(tm_sec: Int32(second), tm_min: Int32(minute), tm_hour: Int32(hour), tm_mday: Int32(day), tm_mon: Int32(month-1), tm_year: Int32(year-1900), tm_wday: 0, tm_yday: 0, tm_isdst: 0, tm_gmtoff: 0, tm_zone: nil)
@@ -106,7 +106,7 @@ public struct Timestamp: Hashable {
     }
     
     public func floor(toNearest: Int) -> Timestamp {
-        Timestamp(timeIntervalSince1970 - timeIntervalSince1970 % toNearest)
+        Timestamp(timeIntervalSince1970 - timeIntervalSince1970.moduloPositive(toNearest))
     }
     
     public func ceil(toNearest: Int) -> Timestamp {
@@ -320,7 +320,7 @@ public extension Sequence where Element == Timestamp {
     var iso8601_YYYYMMddHHmm: [String] {
         var time = 0
         var t = tm()
-        var dateCalculated = 0
+        var dateCalculated = -99999
         return map {
             // only do date calculation if the actual date changes
             if dateCalculated != $0.timeIntervalSince1970 / 86400 {

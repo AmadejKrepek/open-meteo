@@ -15,18 +15,37 @@ final class BufferedParquetFileWriter {
     var longitudes = [Float]()
     var elevations = [Float]()
     var times = [Int64]()
-    var data: [[Float]]
-    let schema: ArrowSchema
-    let writer: ParquetFileWriter
+    var data = [[Float]]()
+    var schema: ArrowSchema? = nil
+    var writer: ParquetFileWriter? = nil
+    let file: String
     
-    init(nVariables: Int, schema: ArrowSchema, writer: ParquetFileWriter) {
-        data = [[Float]](repeating: [Float](), count: nVariables)
-        self.schema = schema
-        self.writer = writer
+    init(file: String) {
+        self.file = file
     }
     
-    /// Append new data, if more than 4k rows, flush to writer
-    func add(data: [[Float]], timestamps: [Int64], location: Int, latitude: Float, longitude: Float, elevation: Float) throws {
+    /// Append new data, if more than 64 MB size rows, flush to writer
+    func add(data: [DataAndUnit], variables: [String], timestamps: [Int64], location: Int, latitude: Float, longitude: Float, elevation: Float) throws {
+        if self.data.isEmpty {
+            self.data = [[Float]](repeating: [Float](), count: data.count)
+            
+            let columns = [
+                ("location_id", .int64),
+                ("latitude", .float),
+                ("longitude", .float),
+                ("elevation", .float),
+                ("time", .timestamp(unit: .second))
+            ] + zip(variables, data).map{("\($0.0)_\($0.1.unit)", ArrowDataType.float)}
+            
+            let schema = try ArrowSchema(columns)
+            let properties = ParquetWriterProperties()
+            // Enable compression on all columns
+            columns.forEach({properties.setCompression(type: .snappy, path: $0.0)})
+            
+            writer = try ParquetFileWriter(path: file, schema: schema, properties: properties)
+            self.schema = schema
+        }
+        
         let nt = timestamps.count
         locations.append(contentsOf: [Int64](repeating: Int64(location), count: nt))
         latitudes.append(contentsOf: [Float](repeating: latitude, count: nt))
@@ -34,18 +53,21 @@ final class BufferedParquetFileWriter {
         elevations.append(contentsOf: [Float](repeating: elevation, count: nt))
         times.append(contentsOf: timestamps)
         for (i,d) in data.enumerated() {
-            self.data[i].append(contentsOf: d)
+            self.data[i].append(contentsOf: d.data)
         }
         let bytesPerRow = (8 + 4 + 4 + 4 + 8 + data.count * 4)
         if locations.count >= 64*1024*1024 / bytesPerRow {
             // flush after 64MB data
-            try flush()
+            try flush(closeFile: false)
         }
     }
     
-    func flush() throws {
+    func flush(closeFile: Bool) throws {
         if locations.isEmpty {
             return
+        }
+        guard let schema, let writer else {
+            fatalError("writer or schema not initialised")
         }
         let table = try ArrowTable(schema: schema, arrays: [
             try ArrowArray(int64: locations),
@@ -63,6 +85,12 @@ final class BufferedParquetFileWriter {
         times.removeAll(keepingCapacity: true)
         for i in data.indices {
             data[i].removeAll(keepingCapacity: true)
+        }
+        
+        if closeFile {
+            try writer.close()
+            self.writer = nil
+            self.data.removeAll()
         }
     }
 }
@@ -114,6 +142,9 @@ struct ExportCommand: AsyncCommandFix {
         @Option(name: "rain-day-distribution")
         var rainDayDistribution: String?
         
+        @Option(name: "latitude-bounds")
+        var latitudeBounds: String?
+        
         @Option(name: "output", short: "o", help: "Output file name. Default: ./output.nc")
         var outputFilename: String?
         
@@ -125,6 +156,9 @@ struct ExportCommand: AsyncCommandFix {
         
         @Flag(name: "output_elevation", help: "Output grid elevation in NetCDF file")
         var outputElevation: Bool
+        
+        @Flag(name: "ignore_sea", help: "Ignore sea points")
+        var ignoreSea: Bool
         
         /// Get time range from parameters
         func getTime(dtSeconds: Int) throws -> TimerangeDt? {
@@ -142,8 +176,14 @@ struct ExportCommand: AsyncCommandFix {
         let domain = try ExportDomain.load(rawValue: signature.domain)
         let regriddingDomain = try TargetGridDomain.load(rawValueOptional: signature.regriddingDomain)
         let format = try ExportFormat.load(rawValueOptional: signature.format) ?? .netcdf
+        disableIdleSleep()
         
         let filePath = signature.outputFilename ?? (format == .netcdf ? "./output.nc" : "./output.parquet")
+        
+        let latitudeBounds = signature.latitudeBounds.map {
+            let parts = $0.split(separator: ",")
+            return Float(parts[0])! ... Float(parts[1])!
+        }
         
         /*let om = try OmFileReader(file: "/Volumes/2TB_1GBs/data/master-MRI_AGCM3_2_S/temperature_2m_max_linear_bias_seasonal.om")
         
@@ -194,34 +234,18 @@ struct ExportCommand: AsyncCommandFix {
                 //outputCoordinates: signature.outputCoordinates,
                 //outputElevation: signature.outputElevation,
                 normals: signature.normalsYears.map { ($0.split(separator: ",").map({Int($0)! }), signature.normalsWith ?? 10) },
-                rainDayDistribution: DailyNormalsCalculator.RainDayDistribution.load(rawValueOptional: signature.rainDayDistribution)
+                rainDayDistribution: DailyNormalsCalculator.RainDayDistribution.load(rawValueOptional: signature.rainDayDistribution),
+                latitudeBounds: latitudeBounds,
+                ignoreSea: signature.ignoreSea
             )
         }
     }
     
-    func generateParquet(logger: Logger, file: String, domain: ExportDomain, variables: [String], time: TimerangeDt, targetGridDomain: TargetGridDomain?, normals: (years: [Int], width: Int)?, rainDayDistribution: DailyNormalsCalculator.RainDayDistribution?) throws {
+    func generateParquet(logger: Logger, file: String, domain: ExportDomain, variables: [String], time: TimerangeDt, targetGridDomain: TargetGridDomain?, normals: (years: [Int], width: Int)?, rainDayDistribution: DailyNormalsCalculator.RainDayDistribution?, latitudeBounds: ClosedRange<Float>?, ignoreSea: Bool) throws {
         #if ENABLE_PARQUET
         
         let grid = targetGridDomain?.genericDomain.grid ?? domain.grid
-        
-        let columns = [
-            ("location_id", .int64),
-            ("latitude", .float),
-            ("longitude", .float),
-            ("elevation", .float),
-            ("time", .timestamp(unit: .second))
-        ] + variables.map({($0, ArrowDataType.float)})
-        
-        let schema = try ArrowSchema(columns)
-        let properties = ParquetWriterProperties()
-        // Enable compression on all columns
-        columns.forEach({properties.setCompression(type: .lz4, path: $0.0)})
-        
-        let writer = try ParquetFileWriter(path: file, schema: schema, properties: properties)
-        defer {
-            try! writer.close()
-        }
-        let container = BufferedParquetFileWriter(nVariables: variables.count, schema: schema, writer: writer)
+        let writer = BufferedParquetFileWriter(file: file)
         
         logger.info("Grid nx=\(grid.nx) ny=\(grid.ny) nTime=\(time.count) nVariables=\(variables.count) (\(time.prettyString()))")
         
@@ -240,21 +264,34 @@ struct ExportCommand: AsyncCommandFix {
                     fatalError("Could not read elevation file for domain \(targetDomain)")
                 }
                 for l in 0..<grid.count {
+                //for l in [grid.findPoint(lat: 47.56, lon: 7.57)!, grid.findPoint(lat: 47.37, lon: 8.55)!] {
+                //for l in grid.findPoint(lat: 47.56, lon: 7.57)! ..< grid.findPoint(lat: 47.56, lon: 7.57)!+300 {
+                    //if l > 0 {
+                    //    break
+                    //}
                     let coords = grid.getCoordinates(gridpoint: l)
+                    if let latitudeBounds, !latitudeBounds.contains(coords.latitude) {
+                        continue
+                    }
                     let elevation = try grid.readElevation(gridpoint: l, elevationFile: elevationFile)
+                    if ignoreSea, try grid.onlySeaAround(gridpoint: l, elevationFile: elevationFile) {
+                        continue
+                    }
                     
                     // Read data
                     let reader = try domain.getReader(targetGridDomain: targetGridDomain, lat: coords.latitude, lon: coords.longitude, elevation: elevation.numeric, mode: .land)
                     let rows = try variables.map { variable in
+                        let reader = variable == "precipitation_sum_imerg" ? try domain.getReader(targetGridDomain: .imerg, lat: coords.latitude, lon: coords.longitude, elevation: elevation.numeric, mode: .land) : reader
+                        let variable = variable == "precipitation_sum_imerg" ? "precipitation_sum" : variable
                         guard let data = try reader.get(mixed: variable, time: time) else {
                             fatalError("Invalid variable \(variable)")
                         }
-                        return normalsCalculator.calculateDailyNormals(variable: variable, values: ArraySlice(data.data), time: time, rainDayDistribution: rainDayDistribution ?? .end).round(digits: data.unit.significantDigits)
+                        return DataAndUnit(normalsCalculator.calculateDailyNormals(variable: variable, values: ArraySlice(data.data), time: time, rainDayDistribution: rainDayDistribution ?? .end).round(digits: data.unit.significantDigits), data.unit)
                     }
-                    try container.add(data: rows, timestamps: timestamps64, location: l, latitude: coords.latitude, longitude: coords.longitude, elevation: elevation.numeric)
+                    try writer.add(data: rows, variables: variables, timestamps: timestamps64, location: l, latitude: coords.latitude, longitude: coords.longitude, elevation: elevation.numeric)
                     progress.add(time.count * 4 * variables.count)
                 }
-                try container.flush()
+                try writer.flush(closeFile: true)
                 progress.finish()
                 return
             }
@@ -266,17 +303,23 @@ struct ExportCommand: AsyncCommandFix {
                 // Read data
                 let reader = try domain.getReader(position: gridpoint)
                 let coords = grid.getCoordinates(gridpoint: gridpoint)
+                if let latitudeBounds, !latitudeBounds.contains(coords.latitude) {
+                    continue
+                }
                 let elevation = try grid.readElevation(gridpoint: gridpoint, elevationFile: elevationFile)
+                if ignoreSea, try grid.onlySeaAround(gridpoint: gridpoint, elevationFile: elevationFile) {
+                    continue
+                }
                 let rows = try variables.map { variable in
                     guard let data = try reader.get(mixed: variable, time: time) else {
                         fatalError("Invalid variable \(variable)")
                     }
-                    return normalsCalculator.calculateDailyNormals(variable: variable, values: ArraySlice(data.data), time: time, rainDayDistribution: rainDayDistribution ?? .end).round(digits: data.unit.significantDigits)
+                    return DataAndUnit(normalsCalculator.calculateDailyNormals(variable: variable, values: ArraySlice(data.data), time: time, rainDayDistribution: rainDayDistribution ?? .end).round(digits: data.unit.significantDigits), data.unit)
                 }
-                try container.add(data: rows, timestamps: timestamps64, location: gridpoint, latitude: coords.latitude, longitude: coords.longitude, elevation: elevation.numeric)
+                try writer.add(data: rows, variables: variables, timestamps: timestamps64, location: gridpoint, latitude: coords.latitude, longitude: coords.longitude, elevation: elevation.numeric)
                 progress.add(time.count * 4 * variables.count)
             }
-            try container.flush()
+            try writer.flush(closeFile: true)
             progress.finish()
             return
         }
@@ -294,19 +337,26 @@ struct ExportCommand: AsyncCommandFix {
             
             for l in 0..<grid.count {
                 let coords = grid.getCoordinates(gridpoint: l)
+                if let latitudeBounds, !latitudeBounds.contains(coords.latitude) {
+                    continue
+                }
                 let elevation = try grid.readElevation(gridpoint: l, elevationFile: elevationFile)
+                if ignoreSea, try grid.onlySeaAround(gridpoint: l, elevationFile: elevationFile) {
+                    continue
+                }
+                let reader = try domain.getReader(targetGridDomain: targetGridDomain, lat: coords.latitude, lon: coords.longitude, elevation: elevation.numeric, mode: .land)
                 let rows = try variables.map { variable in
-                    // Read data
-                    let reader = try domain.getReader(targetGridDomain: targetGridDomain, lat: coords.latitude, lon: coords.longitude, elevation: elevation.numeric, mode: .land)
+                    let reader = variable == "precipitation_sum_imerg" ? try domain.getReader(targetGridDomain: .imerg, lat: coords.latitude, lon: coords.longitude, elevation: elevation.numeric, mode: .land) : reader
+                    let variable = variable == "precipitation_sum_imerg" ? "precipitation_sum" : variable
                     guard let data = try reader.get(mixed: variable, time: time) else {
                         fatalError("Invalid variable \(variable)")
                     }
-                    return data.data
+                    return data
                 }
-                try container.add(data: rows, timestamps: timestamps64, location: l, latitude: coords.latitude, longitude: coords.longitude, elevation: elevation.numeric)
+                try writer.add(data: rows, variables: variables, timestamps: timestamps64, location: l, latitude: coords.latitude, longitude: coords.longitude, elevation: elevation.numeric)
                 progress.add(time.count * 4 * variables.count)
             }
-            try container.flush()
+            try writer.flush(closeFile: true)
             progress.finish()
             return
         }
@@ -319,17 +369,23 @@ struct ExportCommand: AsyncCommandFix {
             // Read data
             let reader = try domain.getReader(position: gridpoint)
             let coords = grid.getCoordinates(gridpoint: gridpoint)
+            if let latitudeBounds, !latitudeBounds.contains(coords.latitude) {
+                continue
+            }
             let elevation = try grid.readElevation(gridpoint: gridpoint, elevationFile: elevationFile)
+            if ignoreSea, try grid.onlySeaAround(gridpoint: gridpoint, elevationFile: elevationFile) {
+                continue
+            }
             let rows = try variables.map { variable in
                 guard let data = try reader.get(mixed: variable, time: time) else {
                     fatalError("Invalid variable \(variable)")
                 }
-                return data.data
+                return data
             }
-            try container.add(data: rows, timestamps: timestamps64, location: gridpoint, latitude: coords.latitude, longitude: coords.longitude, elevation: elevation.numeric)
+            try writer.add(data: rows, variables: variables, timestamps: timestamps64, location: gridpoint, latitude: coords.latitude, longitude: coords.longitude, elevation: elevation.numeric)
             progress.add(time.count * 4 * variables.count)
         }
-        try container.flush()
+        try writer.flush(closeFile: true)
         progress.finish()
         
         #else
@@ -461,6 +517,21 @@ struct ExportCommand: AsyncCommandFix {
         }
         
         progress.finish()
+    }
+}
+
+extension Gridable {
+    /// Return true if there is no land around a 5x5 box
+    func onlySeaAround(gridpoint: Int, elevationFile: OmFileReader<MmapFile>) throws -> Bool {
+        for y in -2...2 {
+            for x in -2...2 {
+                let point = max(0, min(gridpoint + y * nx + x, count))
+                if try !readElevation(gridpoint: point, elevationFile: elevationFile).isSea {
+                    return false
+                }
+            }
+        }
+        return true
     }
 }
 

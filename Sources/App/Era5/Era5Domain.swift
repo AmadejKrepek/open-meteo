@@ -408,6 +408,18 @@ struct Era5Reader<Reader: GenericReaderProtocol>: GenericReaderDerivedSimple, Ge
             try prefetchData(derived: .soil_moisture_0_to_100cm, time: time)
         case .is_day:
             break
+        case .terrestrial_radiation:
+            break
+        case .terrestrial_radiation_instant:
+            break
+        case .shortwave_radiation_instant:
+            try prefetchData(raw: .shortwave_radiation, time: time)
+        case .diffuse_radiation_instant:
+            try prefetchData(derived: .diffuse_radiation, time: time)
+        case .direct_radiation_instant:
+            try prefetchData(raw: .direct_radiation, time: time)
+        case .direct_normal_irradiance_instant:
+            try prefetchData(raw: .direct_radiation, time: time)
         }
     }
     
@@ -545,52 +557,74 @@ struct Era5Reader<Reader: GenericReaderProtocol>: GenericReaderDerivedSimple, Ge
                 return Meteorology.leafwetnessPorbability(temperature2mCelsius: temperature, dewpointCelsius: dewpoint, precipitation: precipitation)
             }), .percent)
         case .soil_moisture_index_0_to_7cm:
-            let soilMoisture = try get(raw: .soil_moisture_0_to_7cm, time: time)
             guard let soilType = try self.getStatic(type: .soilType) else {
                 throw ForecastapiError.generic(message: "Could not read ERA5 soil type")
             }
             guard let type = SoilTypeEra5(rawValue: Int(soilType)) else {
-                throw ForecastapiError.generic(message: "Invalid ERA5 soil type '\(soilType)'")
+                return DataAndUnit([Float](repeating: .nan, count: time.count), .fraction)
             }
+            let soilMoisture = try get(raw: .soil_moisture_0_to_7cm, time: time)
             return DataAndUnit(type.calculateSoilMoistureIndex(soilMoisture.data), .fraction)
         case .soil_moisture_index_7_to_28cm:
-            let soilMoisture = try get(raw: .soil_moisture_7_to_28cm, time: time)
             guard let soilType = try self.getStatic(type: .soilType) else {
                 throw ForecastapiError.generic(message: "Could not read ERA5 soil type")
             }
             guard let type = SoilTypeEra5(rawValue: Int(soilType)) else {
-                throw ForecastapiError.generic(message: "Invalid ERA5 soil type '\(soilType)'")
+                return DataAndUnit([Float](repeating: .nan, count: time.count), .fraction)
             }
+            let soilMoisture = try get(raw: .soil_moisture_7_to_28cm, time: time)
             return DataAndUnit(type.calculateSoilMoistureIndex(soilMoisture.data), .fraction)
         case .soil_moisture_index_28_to_100cm:
-            let soilMoisture = try get(raw: .soil_moisture_28_to_100cm, time: time)
             guard let soilType = try self.getStatic(type: .soilType) else {
                 throw ForecastapiError.generic(message: "Could not read ERA5 soil type")
             }
             guard let type = SoilTypeEra5(rawValue: Int(soilType)) else {
-                throw ForecastapiError.generic(message: "Invalid ERA5 soil type '\(soilType)'")
+                return DataAndUnit([Float](repeating: .nan, count: time.count), .fraction)
             }
+            let soilMoisture = try get(raw: .soil_moisture_28_to_100cm, time: time)
             return DataAndUnit(type.calculateSoilMoistureIndex(soilMoisture.data), .fraction)
         case .soil_moisture_index_100_to_255cm:
-            let soilMoisture = try get(raw: .soil_moisture_100_to_255cm, time: time)
             guard let soilType = try self.getStatic(type: .soilType) else {
                 throw ForecastapiError.generic(message: "Could not read ERA5 soil type")
             }
             guard let type = SoilTypeEra5(rawValue: Int(soilType)) else {
-                throw ForecastapiError.generic(message: "Invalid ERA5 soil type '\(soilType)'")
+                return DataAndUnit([Float](repeating: .nan, count: time.count), .fraction)
             }
+            let soilMoisture = try get(raw: .soil_moisture_100_to_255cm, time: time)
             return DataAndUnit(type.calculateSoilMoistureIndex(soilMoisture.data), .fraction)
         case .soil_moisture_index_0_to_100cm:
-            let soilMoisture = try get(derived: .soil_moisture_0_to_100cm, time: time)
             guard let soilType = try self.getStatic(type: .soilType) else {
                 throw ForecastapiError.generic(message: "Could not read ERA5 soil type")
             }
             guard let type = SoilTypeEra5(rawValue: Int(soilType)) else {
-                throw ForecastapiError.generic(message: "Invalid ERA5 soil type '\(soilType)'")
+                return DataAndUnit([Float](repeating: .nan, count: time.count), .fraction)
             }
+            let soilMoisture = try get(derived: .soil_moisture_0_to_100cm, time: time)
             return DataAndUnit(type.calculateSoilMoistureIndex(soilMoisture.data), .fraction)
         case .is_day:
             return DataAndUnit(Zensun.calculateIsDay(timeRange: time, lat: reader.modelLat, lon: reader.modelLon), .dimensionless_integer)
+        case .terrestrial_radiation:
+            let solar = Zensun.extraTerrestrialRadiationBackwards(latitude: reader.modelLat, longitude: reader.modelLon, timerange: time)
+            return DataAndUnit(solar, .wattPerSquareMeter)
+        case .terrestrial_radiation_instant:
+            let solar = Zensun.extraTerrestrialRadiationInstant(latitude: reader.modelLat, longitude: reader.modelLon, timerange: time)
+            return DataAndUnit(solar, .wattPerSquareMeter)
+        case .shortwave_radiation_instant:
+            let sw = try get(raw: .shortwave_radiation, time: time)
+            let factor = Zensun.backwardsAveragedToInstantFactor(time: time, latitude: reader.modelLat, longitude: reader.modelLon)
+            return DataAndUnit(zip(sw.data, factor).map(*), sw.unit)
+        case .direct_normal_irradiance_instant:
+            let direct = try get(derived: .direct_radiation_instant, time: time)
+            let dni = Zensun.calculateInstantDNI(directRadiation: direct.data, latitude: reader.modelLat, longitude: reader.modelLon, timerange: time)
+            return DataAndUnit(dni, direct.unit)
+        case .direct_radiation_instant:
+            let direct = try get(raw: .direct_radiation, time: time)
+            let factor = Zensun.backwardsAveragedToInstantFactor(time: time, latitude: reader.modelLat, longitude: reader.modelLon)
+            return DataAndUnit(zip(direct.data, factor).map(*), direct.unit)
+        case .diffuse_radiation_instant:
+            let diff = try get(derived: .diffuse_radiation, time: time)
+            let factor = Zensun.backwardsAveragedToInstantFactor(time: time, latitude: reader.modelLat, longitude: reader.modelLon)
+            return DataAndUnit(zip(diff.data, factor).map(*), diff.unit)
         }
     }
 }

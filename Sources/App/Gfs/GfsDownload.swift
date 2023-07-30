@@ -15,7 +15,7 @@ struct GfsDownload: AsyncCommandFix {
         @Option(name: "run")
         var run: String?
 
-        @Flag(name: "skip-existing")
+        @Flag(name: "skip-existing", help: "ONLY FOR TESTING! Do not use in production. May update the database with stale data")
         var skipExisting: Bool
         
         @Flag(name: "create-netcdf")
@@ -40,6 +40,10 @@ struct GfsDownload: AsyncCommandFix {
         let logger = context.application.logger
         let domain = try GfsDomain.load(rawValue: signature.domain)
         disableIdleSleep()
+        
+        if signature.onlyVariables != nil && signature.upperLevel {
+            fatalError("Parameter 'onlyVariables' and 'upperLevel' must not be used simultaneously")
+        }
         
         /// 18z run is available the day after starting 05:26
         let run = try signature.run.flatMap(Timestamp.fromRunHourOrYYYYMMDD) ?? domain.lastRun
