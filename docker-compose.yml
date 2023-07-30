@@ -26,8 +26,8 @@ services:
     restart: "always"
     image: open-meteo:1.0.0
     volumes:
-      - ../open-meteo-data/data:/app/data
-      - ../open-meteo-data/logs:/app/logs
+      - ${DATA_VOLUME_PATH}
+      - ${LOGS_VOLUME_PATH}
     build:
       context: .
     environment:
