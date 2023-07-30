@@ -14,7 +14,7 @@ struct MeteoFranceDownload: AsyncCommandFix {
         @Option(name: "run")
         var run: String?
 
-        @Flag(name: "skip-existing")
+        @Flag(name: "skip-existing", help: "ONLY FOR TESTING! Do not use in production. May update the database with stale data")
         var skipExisting: Bool
         
         @Flag(name: "create-netcdf")
@@ -35,6 +35,10 @@ struct MeteoFranceDownload: AsyncCommandFix {
         let start = DispatchTime.now()
         let logger = context.application.logger
         let domain = try MeteoFranceDomain.load(rawValue: signature.domain)
+        
+        if signature.onlyVariables != nil && signature.upperLevel {
+            fatalError("Parameter 'onlyVariables' and 'upperLevel' must not be used simultaneously")
+        }
         
         let run = try signature.run.flatMap(Timestamp.fromRunHourOrYYYYMMDD) ?? domain.lastRun
         

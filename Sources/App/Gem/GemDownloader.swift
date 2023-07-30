@@ -23,7 +23,7 @@ struct GemDownload: AsyncCommandFix {
         @Option(name: "past-days")
         var pastDays: Int?
         
-        @Flag(name: "skip-existing")
+        @Flag(name: "skip-existing", help: "ONLY FOR TESTING! Do not use in production. May update the database with stale data")
         var skipExisting: Bool
         
         @Flag(name: "create-netcdf")
@@ -34,6 +34,9 @@ struct GemDownload: AsyncCommandFix {
         
         @Option(name: "only-variables")
         var onlyVariables: String?
+        
+        @Option(name: "server", help: "Server base URL. Default 'https://hpfx.collab.science.gc.ca/YYYYMMDD/WXO-DD/'. Alternative 'https://dd.weather.gc.ca/'")
+        var server: String?
     }
     
     var help: String {
@@ -46,6 +49,10 @@ struct GemDownload: AsyncCommandFix {
         let domain = try GemDomain.load(rawValue: signature.domain)
         
         let run = try signature.run.flatMap(Timestamp.fromRunHourOrYYYYMMDD) ?? domain.lastRun
+        
+        if signature.onlyVariables != nil && signature.upperLevel {
+            fatalError("Parameter 'onlyVariables' and 'upperLevel' must not be used simultaneously")
+        }
         
         let onlyVariables: [GemVariableDownloadable]? = signature.onlyVariables.map {
             $0.split(separator: ",").map {
@@ -77,14 +84,14 @@ struct GemDownload: AsyncCommandFix {
         try FileManager.default.createDirectory(atPath: domain.downloadDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(atPath: domain.omfileDirectory, withIntermediateDirectories: true)
         
-        try await downloadElevation(application: context.application, domain: domain, run: run)
-        try await download(application: context.application, domain: domain, variables: variables, run: run, skipFilesIfExisting: signature.skipExisting)
+        try await downloadElevation(application: context.application, domain: domain, run: run, server: signature.server)
+        try await download(application: context.application, domain: domain, variables: variables, run: run, skipFilesIfExisting: signature.skipExisting, server: signature.server)
         try convert(logger: logger, domain: domain, variables: variables, run: run, createNetcdf: signature.createNetcdf)
         logger.info("Finished in \(start.timeElapsedPretty())")
     }
     
     // download seamask and height
-    func downloadElevation(application: Application, domain: GemDomain, run: Timestamp) async throws {
+    func downloadElevation(application: Application, domain: GemDomain, run: Timestamp, server: String?) async throws {
         let logger = application.logger
         let surfaceElevationFileOm = domain.surfaceElevationFileOm
         if FileManager.default.fileExists(atPath: surfaceElevationFileOm) {
@@ -102,13 +109,13 @@ struct GemDownload: AsyncCommandFix {
         if domain == .gem_hrdps_continental {
             // HRDPS has no HGT_SFC_0 file
             // Download temperature, pressure and calculate it manually
-            try grib2d.load(message: try await curl.downloadGrib(url: domain.getUrl(run: run, hour: 0, gribName: "TMP_AGL-2m"), bzip2Decode: false)[0])
+            try grib2d.load(message: try await curl.downloadGrib(url: domain.getUrl(run: run, hour: 0, gribName: "TMP_AGL-2m", server: server), bzip2Decode: false)[0])
             grib2d.array.data.multiplyAdd(multiply: 1, add: -273.15)
             let temperature_2m = grib2d.array.data
-            try grib2d.load(message: try await curl.downloadGrib(url: domain.getUrl(run: run, hour: 0, gribName: "PRES_Sfc"), bzip2Decode: false)[0])
+            try grib2d.load(message: try await curl.downloadGrib(url: domain.getUrl(run: run, hour: 0, gribName: "PRES_Sfc", server: server), bzip2Decode: false)[0])
             grib2d.array.data.multiplyAdd(multiply: 1/100, add: 0)
             let surfacePressure = grib2d.array.data
-            try grib2d.load(message: try await curl.downloadGrib(url: domain.getUrl(run: run, hour: 0, gribName: "PRMSL_MSL"), bzip2Decode: false)[0])
+            try grib2d.load(message: try await curl.downloadGrib(url: domain.getUrl(run: run, hour: 0, gribName: "PRMSL_MSL", server: server), bzip2Decode: false)[0])
             grib2d.array.data.multiplyAdd(multiply: 1/100, add: 0)
             let sealevelPressure = grib2d.array.data
             height = zip(zip(surfacePressure, sealevelPressure), temperature_2m).map {
@@ -116,7 +123,7 @@ struct GemDownload: AsyncCommandFix {
                 return Meteorology.elevation(sealevelPressure: sealevelPressure, surfacePressure: surfacePressure, temperature_2m: temperature_2m)
             }
         } else {
-            let terrainUrl = domain.getUrl(run: run, hour: 0, gribName: "HGT_SFC_0")
+            let terrainUrl = domain.getUrl(run: run, hour: 0, gribName: "HGT_SFC_0", server: server)
             let message = try await curl.downloadGrib(url: terrainUrl, bzip2Decode: false)[0]
             try grib2d.load(message: message)
             if domain == .gem_global_ensemble {
@@ -129,7 +136,7 @@ struct GemDownload: AsyncCommandFix {
         
         if domain != .gem_global_ensemble {
             let gribName = domain == .gem_hrdps_continental ? "LAND_Sfc" : "LAND_SFC_0"
-            let landmaskUrl = domain.getUrl(run: run, hour: 0, gribName: gribName)
+            let landmaskUrl = domain.getUrl(run: run, hour: 0, gribName: gribName, server: server)
             var landmask: Array2D? = nil
             for message in try await curl.downloadGrib(url: landmaskUrl, bzip2Decode: false) {
                 try grib2d.load(message: message)
@@ -150,7 +157,7 @@ struct GemDownload: AsyncCommandFix {
     }
     
     /// Download data and store as compressed files for each timestep
-    func download(application: Application, domain: GemDomain, variables: [GemVariableDownloadable], run: Timestamp, skipFilesIfExisting: Bool) async throws {
+    func download(application: Application, domain: GemDomain, variables: [GemVariableDownloadable], run: Timestamp, skipFilesIfExisting: Bool, server: String?) async throws {
         let logger = application.logger
         let curl = Curl(logger: logger, client: application.dedicatedHttpClient, deadLineHours: domain == .gem_global_ensemble ? 10 : 5)
         let downloadDirectory = domain.downloadDirectory
@@ -187,7 +194,7 @@ struct GemDownload: AsyncCommandFix {
                     continue
                 }
                 
-                let url = domain.getUrl(run: run, hour: hour, gribName: gribName)
+                let url = domain.getUrl(run: run, hour: hour, gribName: gribName, server: server)
                 
                 for message in try await curl.downloadGrib(url: url, bzip2Decode: false) {
                     let member = message.get(attribute: "perturbationNumber").flatMap(Int.init) ?? 0

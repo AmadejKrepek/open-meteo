@@ -361,7 +361,7 @@ final class Cmip6BiasCorrectorInterpolatedWeights: GenericReaderProtocol {
         guard let file = referenceDomain.getStaticFile(type: type) else {
             return nil
         }
-        return try file.readInterpolated(pos: referencePosition)
+        return try referenceDomain.grid.readFromStaticFile(gridpoint: referencePosition.gridpoint, file: file)
     }
     
     func getReferenceElevation() throws -> ElevationOrSea {
@@ -581,28 +581,30 @@ struct Cmip6ReaderPostBiasCorrected<ReaderNext: GenericReaderProtocol>: GenericR
             let tempmax = try get(raw: .raw(.temperature_2m_max), time: time).data
             let tempmin = try get(raw: .raw(.temperature_2m_min), time: time).data
             return DataAndUnit(zip(tempmax, tempmin).map({ (tmax, tmin) in
-                max(min((tmax - tmin) / 2, limit) - base, 0)
+                max(min((tmax + tmin) / 2, limit) - base, 0)
             }), .gddCelsius)
         case .soil_moisture_index_0_to_10cm_mean:
-            let soilMoisture = try get(raw: .raw(.soil_moisture_0_to_10cm_mean), time: time)
             guard let soilType = try self.getStatic(type: .soilType) else {
                 throw ForecastapiError.generic(message: "Could not read soil type")
             }
             guard let type = SoilTypeEra5(rawValue: Int(soilType)) else {
-                throw ForecastapiError.generic(message: "Invalid ERA5 soil type '\(soilType)'")
+                // 0 = water
+                return DataAndUnit([Float](repeating: .nan, count: time.count), .fraction)
             }
+            let soilMoisture = try get(raw: .raw(.soil_moisture_0_to_10cm_mean), time: time)
             return DataAndUnit(type.calculateSoilMoistureIndex(soilMoisture.data), .fraction)
         case .soil_moisture_index_0_to_100cm_mean:
-            let soilMoisture = try get(raw: .derived(.soil_moisture_0_to_100cm_mean), time: time)
             guard let soilType = try self.getStatic(type: .soilType) else {
                 throw ForecastapiError.generic(message: "Could not read soil type")
             }
             guard let type = SoilTypeEra5(rawValue: Int(soilType)) else {
-                throw ForecastapiError.generic(message: "Invalid ERA5 soil type '\(soilType)'")
+                return DataAndUnit([Float](repeating: .nan, count: time.count), .fraction)
             }
+            let soilMoisture = try get(raw: .derived(.soil_moisture_0_to_100cm_mean), time: time)
             return DataAndUnit(type.calculateSoilMoistureIndex(soilMoisture.data), .fraction)
         case .daylight_duration:
-            return DataAndUnit(Zensun.calculateDaylightDuration(timeRange: time.range, lat: modelLat, lon: modelLon, utcOffsetSeconds: 0), .second)
+            // note: time should aldign to UTC 0 midnight
+            return DataAndUnit(Zensun.calculateDaylightDuration(utcMidnight: time.range, lat: modelLat, lon: modelLon), .second)
         case .windspeed_2m_max:
             let wind = try get(raw: .raw(.windspeed_10m_max), time: time)
             let scale = Meteorology.scaleWindFactor(from: 10, to: 2)
