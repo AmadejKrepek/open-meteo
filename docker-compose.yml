@@ -23,9 +23,11 @@ x-shared_environment: &shared_environment
 
 services:
   open-meteo:
-    image: open-meteo:latest
+    restart: "always"
+    image: open-meteo:1.0.0
     volumes:
-      - db_data:/app/data
+      - ${DATA_VOLUME_PATH}
+      - ${LOGS_VOLUME_PATH}
     build:
       context: .
     environment:

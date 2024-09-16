@@ -1,0 +1,6 @@
+37 2,8,14,20 * * * /app/openmeteo-api download icon --only-variables temperature_2m,relativehumidity_2m,precipitation,snowfall_height,snow_depth,weathercode,pressure_msl,cloudcover,windgusts_10m > /app/logs/icon.log 2>&1
+36 2,5,8,11,14,17,20,23 * * * /app/openmeteo-api download icon-eu --only-variables temperature_2m,relativehumidity_2m,precipitation,snowfall_height,snow_depth,weathercode,pressure_msl,cloudcover,windgusts_10m > /app/logs/icon-eu.log 2>&1
+44 0,3,6,9,12,15,18,21 * * * /app/openmeteo-api download icon-d2 --only-variables temperature_2m,relativehumidity_2m,precipitation,snowfall_height,snow_depth,weathercode,pressure_msl,cloudcover,windgusts_10m > /app/logs/icon-d2.log 2>&1
+# Additional cron jobs can be added here
+# 45 7,19 * * * /app/openmeteo-api download-ecmwf > /app/logs/ecmwf.log 2>&1
+# 0 1,13 * * * /app/openmeteo-api download-ecmwf > /app/logs/ecmwf.log 2>&1
